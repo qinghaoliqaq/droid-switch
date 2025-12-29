@@ -97,6 +97,7 @@ fn convert_models(config: &Value) -> Value {
         .collect();
     
     json!(converted)
+
 }
 
 fn settings_path() -> PathBuf {
@@ -257,14 +258,22 @@ pub fn run() {
             let quit_item = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
             let menu = Menu::with_items(app, &[&show_item, &quit_item])?;
             
-            // Create tray icon
+            // Create tray icon with embedded PNG
+            let tray_icon_data = include_bytes!("../icons/tray-icon.png");
+            let tray_img = image::load_from_memory(tray_icon_data).unwrap().to_rgba8();
+            let (width, height) = tray_img.dimensions();
+            let tray_icon = tauri::image::Image::new_owned(tray_img.into_raw(), width, height);
+            
             let _tray = TrayIconBuilder::new()
-                .icon(app.default_window_icon().unwrap().clone())
+                .icon(tray_icon)
+                .icon_as_template(true)
                 .menu(&menu)
                 .show_menu_on_left_click(false)
                 .on_menu_event(|app, event| {
                     match event.id.as_ref() {
                         "show" => {
+                            #[cfg(target_os = "macos")]
+                            let _ = app.set_activation_policy(tauri::ActivationPolicy::Regular);
                             if let Some(window) = app.get_webview_window("main") {
                                 let _ = window.show();
                                 let _ = window.set_focus();
@@ -279,6 +288,8 @@ pub fn run() {
                 .on_tray_icon_event(|tray, event| {
                     if let TrayIconEvent::Click { button: MouseButton::Left, button_state: MouseButtonState::Up, .. } = event {
                         let app = tray.app_handle();
+                        #[cfg(target_os = "macos")]
+                        let _ = app.set_activation_policy(tauri::ActivationPolicy::Regular);
                         if let Some(window) = app.get_webview_window("main") {
                             let _ = window.show();
                             let _ = window.set_focus();
@@ -291,8 +302,10 @@ pub fn run() {
         })
         .on_window_event(|window, event| {
             if let WindowEvent::CloseRequested { api, .. } = event {
-                // Hide window instead of closing
+                // Hide window and remove from Dock
                 let _ = window.hide();
+                #[cfg(target_os = "macos")]
+                let _ = window.app_handle().set_activation_policy(tauri::ActivationPolicy::Accessory);
                 api.prevent_close();
             }
         })
