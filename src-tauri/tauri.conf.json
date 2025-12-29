@@ -12,11 +12,16 @@
   "app": {
     "windows": [
       {
-        "title": "dd-switch",
+        "title": "DD Switch",
         "width": 800,
-        "height": 600
+        "height": 600,
+        "visible": true
       }
     ],
+    "trayIcon": {
+      "iconPath": "icons/icon.png",
+      "iconAsTemplate": true
+    },
     "security": {
       "csp": null
     }
