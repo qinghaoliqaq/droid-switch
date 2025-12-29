@@ -260,6 +260,7 @@ fn check_droid_installed() -> Option<String> {
 #[tauri::command]
 async fn install_droid(proxy: Option<String>) -> Result<String, String> {
     let os = std::env::consts::OS;
+    let home = std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")).unwrap_or_default();
     
     let mut cmd = if os == "windows" {
         let mut c = std::process::Command::new("powershell");
@@ -271,7 +272,6 @@ async fn install_droid(proxy: Option<String>) -> Result<String, String> {
         c
     };
     
-    // Set proxy environment variables if provided
     if let Some(ref p) = proxy {
         if !p.is_empty() {
             cmd.env("http_proxy", p);
@@ -284,15 +284,40 @@ async fn install_droid(proxy: Option<String>) -> Result<String, String> {
     
     match output {
         Ok(out) => {
-            if out.status.success() {
-                // Check if droid is now installed
-                if let Some(version) = check_droid_installed() {
-                    Ok(format!("安装成功！版本: {}", version))
+            let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+            
+            // Auto-configure PATH for macOS/Linux
+            if os != "windows" && stdout.contains("PATH configuration required") {
+                let local_bin = format!("{}/.local/bin", home);
+                let shell_rc = if std::path::Path::new(&format!("{}/.zshrc", home)).exists() {
+                    format!("{}/.zshrc", home)
                 } else {
-                    Ok(String::from_utf8_lossy(&out.stdout).to_string())
+                    format!("{}/.bashrc", home)
+                };
+                
+                // Check if PATH already configured
+                let rc_content = std::fs::read_to_string(&shell_rc).unwrap_or_default();
+                if !rc_content.contains(&local_bin) {
+                    let export_line = format!("\nexport PATH={}:$PATH\n", local_bin);
+                    let _ = std::fs::OpenOptions::new()
+                        .append(true)
+                        .open(&shell_rc)
+                        .and_then(|mut f| std::io::Write::write_all(&mut f, export_line.as_bytes()));
                 }
+            }
+            
+            if let Some(version) = check_droid_installed() {
+                Ok(format!("安装成功！版本: {}", version))
             } else {
-                Err(String::from_utf8_lossy(&out.stderr).to_string())
+                // Try with full path
+                let droid_path = format!("{}/.local/bin/droid", home);
+                if let Ok(out) = std::process::Command::new(&droid_path).arg("--version").output() {
+                    if out.status.success() {
+                        let v = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                        return Ok(format!("安装成功！版本: {}\n已自动配置环境变量，重启终端后生效", v));
+                    }
+                }
+                Ok(stdout)
             }
         }
         Err(e) => Err(e.to_string())
@@ -487,13 +512,14 @@ pub fn run() {
             get_default_factory_path, save_config_order, get_platform, install_droid, check_droid_installed
         ])
         .setup(|app| {
-            // Use app icon for tray
+            // Load tray icon
             let icon = app.default_window_icon().cloned().unwrap();
             
             let menu = build_tray_menu(app)?;
             
             let _tray = TrayIconBuilder::with_id("main")
                 .icon(icon)
+                .icon_as_template(true)
                 .menu(&menu)
                 .show_menu_on_left_click(true)
                 .on_menu_event(|app, event| {
