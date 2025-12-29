@@ -1,6 +1,7 @@
 import { useState, useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
   DndContext,
   closestCenter,
@@ -146,13 +147,13 @@ function App() {
   };
 
   useEffect(() => {
+    const win = getCurrentWindow();
+    win.show();
+    win.setFocus();
     loadSettings().then(() => loadConfigs()).finally(() => setLoading(false));
-    checkDroid(); // 异步检测，不阻塞主界面
+    checkDroid();
     
-    // Listen for config changes from tray menu
-    const unlisten = listen<string>("config-changed", () => {
-      loadConfigs();
-    });
+    const unlisten = listen<string>("config-changed", () => loadConfigs());
     return () => { unlisten.then(fn => fn()); };
   }, []);
 
