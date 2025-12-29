@@ -519,7 +519,6 @@ pub fn run() {
             
             let _tray = TrayIconBuilder::with_id("main")
                 .icon(icon)
-                .icon_as_template(true)
                 .menu(&menu)
                 .show_menu_on_left_click(true)
                 .on_menu_event(|app, event| {
