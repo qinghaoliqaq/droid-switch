@@ -442,7 +442,7 @@ fn import_current() -> Result<String, String> {
 }
 
 use tauri::{
-    Manager,
+    Emitter, Manager,
     tray::TrayIconBuilder,
     menu::{Menu, MenuItem, Submenu, PredefinedMenuItem},
     WindowEvent,
@@ -500,13 +500,15 @@ pub fn run() {
                     let id = event.id.as_ref();
                     if id.starts_with("config:") {
                         let path = id.strip_prefix("config:").unwrap().to_string();
-                        let _ = apply_config(path);
+                        let _ = apply_config(path.clone());
                         // Rebuild menu to update checkmarks
                         if let Some(tray) = app.tray_by_id("main") {
                             if let Ok(new_menu) = build_tray_menu_runtime(app) {
                                 let _ = tray.set_menu(Some(new_menu));
                             }
                         }
+                        // Notify frontend to refresh
+                        let _ = app.emit("config-changed", path);
                     } else {
                         match id {
                             "show" => {

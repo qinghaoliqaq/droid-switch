@@ -1,5 +1,6 @@
 import { useState, useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import {
   DndContext,
   closestCenter,
@@ -147,6 +148,12 @@ function App() {
   useEffect(() => {
     loadSettings().then(() => loadConfigs()).finally(() => setLoading(false));
     checkDroid(); // 异步检测，不阻塞主界面
+    
+    // Listen for config changes from tray menu
+    const unlisten = listen<string>("config-changed", () => {
+      loadConfigs();
+    });
+    return () => { unlisten.then(fn => fn()); };
   }, []);
 
   const showStatus = (msg: string) => {
@@ -273,7 +280,7 @@ function App() {
     <div className="app">
       <header className="header">
         <div className="header-left">
-          <span className="logo">DD Switch</span>
+          <span className="logo">Droid Switch</span>
           <button className="settings-btn" onClick={() => setShowSettings(true)}>⚙</button>
         </div>
 

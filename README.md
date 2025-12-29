@@ -1,4 +1,4 @@
-# DD Switch
+# Droid Switch
 
 一个用于快速切换 Factory Droid 自定义模型配置的桌面工具。
 
