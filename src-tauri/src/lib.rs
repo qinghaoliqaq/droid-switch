@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{fs, path::PathBuf};
+use std::sync::Mutex;
 
 #[derive(Serialize, Deserialize)]
 struct ConfigFile {
@@ -8,8 +9,70 @@ struct ConfigFile {
     path: String,
 }
 
+#[derive(Serialize, Deserialize, Clone)]
+struct AppSettings {
+    factory_path: Option<String>,
+    #[serde(default)]
+    config_order: Vec<String>,
+}
+
+impl Default for AppSettings {
+    fn default() -> Self {
+        Self { 
+            factory_path: None,
+            config_order: vec![],
+        }
+    }
+}
+
+static APP_SETTINGS: Mutex<Option<AppSettings>> = Mutex::new(None);
+
+fn app_settings_path() -> PathBuf {
+    dirs::config_dir()
+        .unwrap_or_else(|| dirs::home_dir().unwrap())
+        .join("dd-switch")
+        .join("settings.json")
+}
+
+fn load_app_settings() -> AppSettings {
+    let mut settings = APP_SETTINGS.lock().unwrap();
+    if settings.is_none() {
+        let path = app_settings_path();
+        *settings = if path.exists() {
+            fs::read_to_string(&path)
+                .ok()
+                .and_then(|s| serde_json::from_str(&s).ok())
+        } else {
+            Some(AppSettings::default())
+        };
+    }
+    settings.clone().unwrap_or_default()
+}
+
+fn save_app_settings(new_settings: &AppSettings) -> Result<(), String> {
+    let path = app_settings_path();
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    let content = serde_json::to_string_pretty(new_settings).map_err(|e| e.to_string())?;
+    fs::write(&path, content).map_err(|e| e.to_string())?;
+    let mut settings = APP_SETTINGS.lock().unwrap();
+    *settings = Some(new_settings.clone());
+    Ok(())
+}
+
+fn factory_base_dir() -> PathBuf {
+    let settings = load_app_settings();
+    if let Some(custom_path) = settings.factory_path {
+        if !custom_path.is_empty() {
+            return PathBuf::from(custom_path);
+        }
+    }
+    dirs::home_dir().unwrap().join(".factory")
+}
+
 fn configs_dir() -> PathBuf {
-    dirs::home_dir().unwrap().join(".factory/configs")
+    factory_base_dir().join("configs")
 }
 
 // Check if model object is in correct Factory format
@@ -101,11 +164,11 @@ fn convert_models(config: &Value) -> Value {
 }
 
 fn settings_path() -> PathBuf {
-    dirs::home_dir().unwrap().join(".factory/settings.json")
+    factory_base_dir().join("settings.json")
 }
 
 fn config_path() -> PathBuf {
-    dirs::home_dir().unwrap().join(".factory/config.json")
+    factory_base_dir().join("config.json")
 }
 
 fn target_path() -> PathBuf {
@@ -133,8 +196,107 @@ fn list_configs() -> Vec<ConfigFile> {
             }
         }
     }
-    configs.sort_by(|a, b| a.name.cmp(&b.name));
+    
+    // Sort by saved order, new configs go to end
+    let settings = load_app_settings();
+    if !settings.config_order.is_empty() {
+        configs.sort_by(|a, b| {
+            let pos_a = settings.config_order.iter().position(|x| x == &a.name).unwrap_or(usize::MAX);
+            let pos_b = settings.config_order.iter().position(|x| x == &b.name).unwrap_or(usize::MAX);
+            pos_a.cmp(&pos_b)
+        });
+    } else {
+        configs.sort_by(|a, b| a.name.cmp(&b.name));
+    }
     configs
+}
+
+#[tauri::command]
+fn save_config_order(order: Vec<String>) -> Result<(), String> {
+    let mut settings = load_app_settings();
+    settings.config_order = order;
+    save_app_settings(&settings)
+}
+
+#[tauri::command]
+fn get_platform() -> String {
+    std::env::consts::OS.to_string()
+}
+
+#[tauri::command]
+fn check_droid_installed() -> Option<String> {
+    // Try multiple possible paths for droid
+    let paths = if cfg!(target_os = "windows") {
+        vec![
+            "droid".to_string(),
+            format!("{}\\AppData\\Local\\Programs\\droid\\droid.exe", std::env::var("USERPROFILE").unwrap_or_default()),
+        ]
+    } else {
+        vec![
+            "droid".to_string(),
+            format!("{}/bin/droid", std::env::var("HOME").unwrap_or_default()),
+            "/usr/local/bin/droid".to_string(),
+            format!("{}/.local/bin/droid", std::env::var("HOME").unwrap_or_default()),
+        ]
+    };
+    
+    for path in paths {
+        let output = std::process::Command::new(&path)
+            .arg("--version")
+            .output();
+        
+        if let Ok(out) = output {
+            if out.status.success() {
+                let version = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                if !version.is_empty() {
+                    return Some(version);
+                }
+            }
+        }
+    }
+    None
+}
+
+#[tauri::command]
+async fn install_droid(proxy: Option<String>) -> Result<String, String> {
+    let os = std::env::consts::OS;
+    
+    let mut cmd = if os == "windows" {
+        let mut c = std::process::Command::new("powershell");
+        c.args(["-Command", "irm https://app.factory.ai/cli/windows | iex"]);
+        c
+    } else {
+        let mut c = std::process::Command::new("sh");
+        c.args(["-c", "curl -fsSL https://app.factory.ai/cli | sh"]);
+        c
+    };
+    
+    // Set proxy environment variables if provided
+    if let Some(ref p) = proxy {
+        if !p.is_empty() {
+            cmd.env("http_proxy", p);
+            cmd.env("https_proxy", p);
+            cmd.env("all_proxy", p);
+        }
+    }
+    
+    let output = cmd.output();
+    
+    match output {
+        Ok(out) => {
+            if out.status.success() {
+                // Check if droid is now installed
+                if let Some(version) = check_droid_installed() {
+                    Ok(format!("安装成功！版本: {}", version))
+                } else {
+                    Ok(String::from_utf8_lossy(&out.stdout).to_string())
+                }
+            } else {
+                Err(String::from_utf8_lossy(&out.stderr).to_string())
+            }
+        }
+        Err(e) => Err(e.to_string())
+    }
 }
 
 #[tauri::command]
@@ -164,6 +326,48 @@ fn create_config(name: String) -> Result<String, String> {
 #[tauri::command]
 fn delete_config(path: String) -> Result<(), String> {
     fs::remove_file(&path).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn rename_config(old_path: String, new_name: String) -> Result<String, String> {
+    let old = PathBuf::from(&old_path);
+    let new_path = old.parent()
+        .ok_or("Invalid path")?
+        .join(format!("{}.json", new_name));
+    
+    if new_path.exists() {
+        return Err("Config with this name already exists".to_string());
+    }
+    
+    fs::rename(&old_path, &new_path).map_err(|e| e.to_string())?;
+    Ok(new_path.to_string_lossy().to_string())
+}
+
+#[tauri::command]
+fn get_app_settings() -> AppSettings {
+    load_app_settings()
+}
+
+#[tauri::command]
+fn set_factory_path(path: String) -> Result<(), String> {
+    let mut settings = load_app_settings();
+    settings.factory_path = if path.is_empty() { None } else { Some(path) };
+    save_app_settings(&settings)
+}
+
+#[tauri::command]
+fn check_factory_path() -> Result<bool, String> {
+    let base = factory_base_dir();
+    Ok(base.exists() && (base.join("settings.json").exists() || base.join("config.json").exists()))
+}
+
+#[tauri::command]
+fn get_default_factory_path() -> String {
+    dirs::home_dir()
+        .unwrap()
+        .join(".factory")
+        .to_string_lossy()
+        .to_string()
 }
 
 #[tauri::command]
@@ -250,7 +454,9 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![
             list_configs, read_config, save_config, create_config,
-            delete_config, apply_config, import_current, get_current_config
+            delete_config, apply_config, import_current, get_current_config,
+            rename_config, get_app_settings, set_factory_path, check_factory_path,
+            get_default_factory_path, save_config_order, get_platform, install_droid, check_droid_installed
         ])
         .setup(|app| {
             // Create tray menu
