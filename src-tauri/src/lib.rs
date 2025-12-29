@@ -443,10 +443,38 @@ fn import_current() -> Result<String, String> {
 
 use tauri::{
     Manager,
-    tray::{TrayIconBuilder, MouseButton, MouseButtonState, TrayIconEvent},
-    menu::{Menu, MenuItem},
+    tray::TrayIconBuilder,
+    menu::{Menu, MenuItem, Submenu, PredefinedMenuItem},
     WindowEvent,
 };
+
+fn build_tray_menu(app: &tauri::App) -> Result<Menu<tauri::Wry>, Box<dyn std::error::Error>> {
+    let configs = list_configs();
+    let current = get_current_config();
+    
+    // Create config submenu items
+    let mut config_items: Vec<MenuItem<tauri::Wry>> = Vec::new();
+    for cfg in &configs {
+        let label = if Some(cfg.path.clone()) == current {
+            format!("✓ {}", cfg.name)
+        } else {
+            format!("  {}", cfg.name)
+        };
+        let item = MenuItem::with_id(app, &format!("config:{}", cfg.path), &label, true, None::<&str>)?;
+        config_items.push(item);
+    }
+    
+    let show_item = MenuItem::with_id(app, "show", "显示窗口", true, None::<&str>)?;
+    let quit_item = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
+    
+    if config_items.is_empty() {
+        Ok(Menu::with_items(app, &[&show_item, &PredefinedMenuItem::separator(app)?, &quit_item])?)
+    } else {
+        let config_refs: Vec<&MenuItem<tauri::Wry>> = config_items.iter().collect();
+        let configs_submenu = Submenu::with_items(app, "切换配置", true, &config_refs.iter().map(|i| *i as &dyn tauri::menu::IsMenuItem<tauri::Wry>).collect::<Vec<_>>())?;
+        Ok(Menu::with_items(app, &[&configs_submenu, &PredefinedMenuItem::separator(app)?, &show_item, &quit_item])?)
+    }
+}
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -459,46 +487,40 @@ pub fn run() {
             get_default_factory_path, save_config_order, get_platform, install_droid, check_droid_installed
         ])
         .setup(|app| {
-            // Create tray menu
-            let show_item = MenuItem::with_id(app, "show", "显示窗口", true, None::<&str>)?;
-            let quit_item = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
-            let menu = Menu::with_items(app, &[&show_item, &quit_item])?;
+            // Use app icon for tray
+            let icon = app.default_window_icon().cloned().unwrap();
             
-            // Create tray icon with embedded PNG
-            let tray_icon_data = include_bytes!("../icons/tray-icon.png");
-            let tray_img = image::load_from_memory(tray_icon_data).unwrap().to_rgba8();
-            let (width, height) = tray_img.dimensions();
-            let tray_icon = tauri::image::Image::new_owned(tray_img.into_raw(), width, height);
+            let menu = build_tray_menu(app)?;
             
-            let _tray = TrayIconBuilder::new()
-                .icon(tray_icon)
-                .icon_as_template(true)
+            let _tray = TrayIconBuilder::with_id("main")
+                .icon(icon)
                 .menu(&menu)
-                .show_menu_on_left_click(false)
+                .show_menu_on_left_click(true)
                 .on_menu_event(|app, event| {
-                    match event.id.as_ref() {
-                        "show" => {
-                            #[cfg(target_os = "macos")]
-                            let _ = app.set_activation_policy(tauri::ActivationPolicy::Regular);
-                            if let Some(window) = app.get_webview_window("main") {
-                                let _ = window.show();
-                                let _ = window.set_focus();
+                    let id = event.id.as_ref();
+                    if id.starts_with("config:") {
+                        let path = id.strip_prefix("config:").unwrap().to_string();
+                        let _ = apply_config(path);
+                        // Rebuild menu to update checkmarks
+                        if let Some(tray) = app.tray_by_id("main") {
+                            if let Ok(new_menu) = build_tray_menu_runtime(app) {
+                                let _ = tray.set_menu(Some(new_menu));
                             }
                         }
-                        "quit" => {
-                            app.exit(0);
-                        }
-                        _ => {}
-                    }
-                })
-                .on_tray_icon_event(|tray, event| {
-                    if let TrayIconEvent::Click { button: MouseButton::Left, button_state: MouseButtonState::Up, .. } = event {
-                        let app = tray.app_handle();
-                        #[cfg(target_os = "macos")]
-                        let _ = app.set_activation_policy(tauri::ActivationPolicy::Regular);
-                        if let Some(window) = app.get_webview_window("main") {
-                            let _ = window.show();
-                            let _ = window.set_focus();
+                    } else {
+                        match id {
+                            "show" => {
+                                #[cfg(target_os = "macos")]
+                                let _ = app.set_activation_policy(tauri::ActivationPolicy::Regular);
+                                if let Some(window) = app.get_webview_window("main") {
+                                    let _ = window.show();
+                                    let _ = window.set_focus();
+                                }
+                            }
+                            "quit" => {
+                                app.exit(0);
+                            }
+                            _ => {}
                         }
                     }
                 })
@@ -508,7 +530,6 @@ pub fn run() {
         })
         .on_window_event(|window, event| {
             if let WindowEvent::CloseRequested { api, .. } = event {
-                // Hide window and remove from Dock
                 let _ = window.hide();
                 #[cfg(target_os = "macos")]
                 let _ = window.app_handle().set_activation_policy(tauri::ActivationPolicy::Accessory);
@@ -517,4 +538,31 @@ pub fn run() {
         })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+fn build_tray_menu_runtime(app: &tauri::AppHandle) -> Result<Menu<tauri::Wry>, Box<dyn std::error::Error>> {
+    let configs = list_configs();
+    let current = get_current_config();
+    
+    let mut config_items: Vec<MenuItem<tauri::Wry>> = Vec::new();
+    for cfg in &configs {
+        let label = if Some(cfg.path.clone()) == current {
+            format!("✓ {}", cfg.name)
+        } else {
+            format!("  {}", cfg.name)
+        };
+        let item = MenuItem::with_id(app, &format!("config:{}", cfg.path), &label, true, None::<&str>)?;
+        config_items.push(item);
+    }
+    
+    let show_item = MenuItem::with_id(app, "show", "显示窗口", true, None::<&str>)?;
+    let quit_item = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
+    
+    if config_items.is_empty() {
+        Ok(Menu::with_items(app, &[&show_item, &PredefinedMenuItem::separator(app)?, &quit_item])?)
+    } else {
+        let config_refs: Vec<&MenuItem<tauri::Wry>> = config_items.iter().collect();
+        let configs_submenu = Submenu::with_items(app, "切换配置", true, &config_refs.iter().map(|i| *i as &dyn tauri::menu::IsMenuItem<tauri::Wry>).collect::<Vec<_>>())?;
+        Ok(Menu::with_items(app, &[&configs_submenu, &PredefinedMenuItem::separator(app)?, &show_item, &quit_item])?)
+    }
 }
